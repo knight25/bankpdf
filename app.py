@@ -1,33 +1,52 @@
-from flask import Flask, render_template, request, send_file
-from utils.converter import convert_pdf_to_excel
+from flask import Flask, request, send_file, render_template
+import pdfplumber
+import pandas as pd
+import io
 import os
-import uuid
+import traceback
 
 app = Flask(__name__)
-UPLOAD_FOLDER = "uploads"
-OUTPUT_FOLDER = "output"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-@app.route("/", methods=["GET", "POST"])
+@app.route("/")
 def index():
-    if request.method == "POST":
-        file = request.files["file"]
-        if file.filename.endswith(".pdf"):
-            pdf_path = os.path.join(UPLOAD_FOLDER, file.filename)
-            file.save(pdf_path)
-            output_filename = f"{uuid.uuid4().hex}.xlsx"
-            output_path = os.path.join(OUTPUT_FOLDER, output_filename)
-
-            convert_pdf_to_excel(pdf_path, output_path)
-
-            return send_file(output_path, as_attachment=True)
-
     return render_template("index.html")
 
-import os
+@app.route("/convert", methods=["POST"])
+def convert():
+    try:
+        file = request.files.get("file")
+        if not file:
+            return "No file uploaded", 400
+
+        with pdfplumber.open(file) as pdf:
+            all_data = []
+            for page in pdf.pages:
+                table = page.extract_table()
+                if table:
+                    all_data.extend(table)
+
+        if not all_data:
+            return "No tables found in the PDF.", 400
+
+        # Convert to DataFrame and remove the header row from data
+        df = pd.DataFrame(all_data[1:], columns=all_data[0])
+
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=False, sheet_name="Sheet1")
+        output.seek(0)
+
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name="converted.xlsx",
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    except Exception as e:
+        # Log the error to Render logs
+        traceback.print_exc()
+        return f"An error occurred while converting the PDF: {str(e)}", 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(debug=False, host="0.0.0.0", port=port)
-
